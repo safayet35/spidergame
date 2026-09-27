@@ -64,9 +64,10 @@ function bootBar() {
 function paintBoot(cur) {
   try {
     const flags = ['nocity', 'notex', 'nodetail', 'nosys', 'noshadow', 'nowarm', 'diag'].filter(f => params.has(f)).map(f => '?' + f);
-    const q = params.get('q'), dpr = params.get('dpr');
+    const q = params.get('q'), dpr = params.get('dpr'), fbq = params.get('fbq');
     if (q) flags.push('?q=' + q);
     if (dpr) flags.push('?dpr=' + dpr);
+    if (fbq) flags.push('?fbq=' + fbq);
     bootEl.textContent = 'Loading Spider-Man... ' + bootBar() + ' (' + ((performance.now() - bootT0) / 1000).toFixed(1) + 's ' + memMB() + ' [' + PRESET + ']' + (flags.length ? ' ' + flags.join(' ') : '') + ')\n'
       + bootRows.join('\n') + (cur ? '\n… ' + cur : '');
   } catch { /* ignore */ }
@@ -182,7 +183,7 @@ try {
   world = fallback === 'stub'
     ? await stage('stub-world (?nocity)', async () => stubWorld())
     : fallback === 'fallback'
-    ? await stage('city-fallback', async () => buildFallbackCity({ scene, renderer }, { onStage: cityStage }))
+    ? await stage('city-fallback', async () => buildFallbackCity({ scene, renderer }, { onStage: cityStage, fbq: params.get('fbq') || 'med' }))
     : await stage('city', async () => buildCity({ scene, renderer }, { onStage: cityStage, nodetail: params.has('nodetail') || isPotato() }));
   input = await stage('input', async () => createInput(renderer.domElement));
   player = await stage('player', async () => createPlayer({ scene, world, camera, input, renderer }));

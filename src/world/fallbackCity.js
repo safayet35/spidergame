@@ -9,13 +9,16 @@
 // runs unmodified. Desktop never uses this path (see main.js ?city=full).
 import * as THREE from 'three';
 import { mulberry32 } from './layout.js';
+import { nightK } from '../render/daynight.js';
 
-const WALLS = [[0.72, 0.74, 0.77], [0.60, 0.63, 0.68], [0.79, 0.76, 0.70], [0.50, 0.55, 0.65], [0.63, 0.42, 0.35], [0.82, 0.82, 0.84]];
+const WALLS_LEGACY = [[0.72, 0.74, 0.77], [0.60, 0.63, 0.68], [0.79, 0.76, 0.70], [0.50, 0.55, 0.65], [0.63, 0.42, 0.35], [0.82, 0.82, 0.84]];
+// Stage 1: wider empire/state palette (still vertex colors, still one material).
+const WALLS = [...WALLS_LEGACY, [0.55, 0.50, 0.44], [0.44, 0.52, 0.60], [0.70, 0.58, 0.48], [0.38, 0.40, 0.45]];
 const ROOF = [0.42, 0.43, 0.46];
 const SLAB = [0.20, 0.22, 0.25];
 const GROUND = [0.13, 0.14, 0.16];
 
-function pushBox(P, C, I, V, x0, y0, z0, x1, y1, z1, wall, roof) {
+function pushBox(P, C, I, V, x0, y0, z0, x1, y1, z1, wall, roof, baseCol = null, baseH = 0) {
   // 24 verts (4 per face, BoxGeometry order: +x,-x,+y,-y,+z,-z); top face gets roof colour.
   const base = V.n;
   const corners = [
@@ -27,9 +30,10 @@ function pushBox(P, C, I, V, x0, y0, z0, x1, y1, z1, wall, roof) {
     [x1, y0, z0], [x0, y0, z0], [x1, y1, z0], [x0, y1, z0], // -z
   ];
   for (let f = 0; f < 6; f++) {
-    const c = f === 2 ? roof : wall;
     for (let k = 0; k < 4; k++) {
       const p = corners[f * 4 + k];
+      // Stage 1: darker base band on the street level of side faces (f==2 roof, f==3 unseen bottom).
+      const c = f === 2 ? roof : (baseCol && f !== 3 && p[1] < y0 + baseH ? baseCol : wall);
       P.push(p[0], p[1], p[2]); C.push(c[0], c[1], c[2]);
     }
     const b = base + f * 4;
@@ -59,8 +63,19 @@ function rayBox(ox, oy, oz, dx, dy, dz, b, maxT) {
   return { t: tmin, normal: n };
 }
 
-export async function buildFallbackCity({ scene, renderer }, { onStage } = {}) {
+// unlit quad (DoubleSide: no winding bookkeeping), for the merged window meshes.
+function pushQuad(P, C, I, V, a, b, c, d, col) {
+  const base = V.n;
+  for (const p of [a, b, c, d]) { P.push(p[0], p[1], p[2]); C.push(col[0], col[1], col[2]); }
+  I.push(base, base + 1, base + 2, base, base + 2, base + 3);
+  V.n = base + 4;
+}
+
+export async function buildFallbackCity({ scene, renderer }, { onStage, fbq = 'med' } = {}) {
   void renderer;
+  // fbq=low renders the original stable output exactly (legacy palette, no
+  // jitter/base/windows). Guaranteed rollback: ?city=fallback&fbq=low.
+  const Q = fbq === 'low' ? 0 : 2;
   const t0 = performance.now();
   const rnd = mulberry32(1234);
   const root = new THREE.Group(); root.name = 'fallbackCity';
@@ -68,7 +83,7 @@ export async function buildFallbackCity({ scene, renderer }, { onStage } = {}) {
 
   // 9x9 blocks, 64 m lots + 26 m streets (pitch 90). Origin sits on a street
   // crossing so spawn (0, *, 0) is in the open.
-  const N = 9, PITCH = 90, LOT = 64;
+  const N = 9, PITCH = 90;
   const boxes = []; // {min:[x,y,z], max:[x,y,z]}
   const P = [], C = [], I = [], V = { n: 0 };
   const half = (N * PITCH) / 2;
@@ -86,14 +101,20 @@ export async function buildFallbackCity({ scene, renderer }, { onStage } = {}) {
       const px = x0 + 15 + rnd() * Math.max(1, 60 - w), pz = z0 + 15 + rnd() * Math.max(1, 60 - d);
       const tall = rnd() < 0.12;
       const h = tall ? 110 + rnd() * 50 : 16 + Math.pow(rnd(), 1.6) * 80;
-      const wall = WALLS[Math.floor(rnd() * WALLS.length)];
+      // Stage 1: wider palette + per-building brightness jitter + dark base.
+      // fbq=low keeps the legacy flat look exactly.
+      const pal = Q === 0 ? WALLS_LEGACY : WALLS;
+      const wall0 = pal[Math.floor(rnd() * pal.length)];
+      const jit = Q === 0 ? 1 : 0.92 + rnd() * 0.16;
+      const wall = [wall0[0] * jit, wall0[1] * jit, wall0[2] * jit];
+      const base = Q === 0 ? null : [wall[0] * 0.5, wall[1] * 0.5, wall[2] * 0.55];
       boxes.push({ min: [px, 0.3, pz], max: [px + w, 0.3 + h, pz + d] });
-      pushBox(P, C, I, V, px, 0.3, pz, px + w, 0.3 + h, pz + d, wall, ROOF);
+      pushBox(P, C, I, V, px, 0.3, pz, px + w, 0.3 + h, pz + d, wall, ROOF, base, 6);
       if (!tall && rnd() < 0.4) { // setback crown
         const cw = w * 0.55, cd = d * 0.55, ch = 6 + rnd() * 10;
         const cx = px + (w - cw) / 2, cz = pz + (d - cd) / 2;
         boxes.push({ min: [cx, 0.3 + h, cz], max: [cx + cw, 0.3 + h + ch, cz + cd] });
-        pushBox(P, C, I, V, cx, 0.3 + h, cz, cx + cw, 0.3 + h + ch, cz + cd, wall, ROOF);
+        pushBox(P, C, I, V, cx, 0.3 + h, cz, cx + cw, 0.3 + h + ch, cz + cd, wall, ROOF, null, 0);
       }
     }
   }
@@ -116,6 +137,62 @@ export async function buildFallbackCity({ scene, renderer }, { onStage } = {}) {
   ground.rotation.x = -Math.PI / 2; ground.position.y = -0.05;
   ground.receiveShadow = true;
   root.add(ground);
+
+  // Stage 2: cheap windows — merged unlit quads, zero textures. Glass mesh is
+  // always drawn (+1 draw); glow mesh holds only lit quads and is visible at
+  // night only (+1 draw at night, toneMapped:false for punch without bloom).
+  let winGlass = null, winGlow = null, winQuads = 0;
+  if (Q > 0) {
+    const WG = [], WC = [], WI = [], WV = { n: 0 };
+    const GG = [], GC = [], GI = [], GV = { n: 0 };
+    const CAP = 7000; // quad cap: 14k quads worst case = 28k tris, well inside budget
+    const wrnd = mulberry32(777);
+    const winOn = b => (b.max[1] - b.min[1]) >= 20 && (b.max[0] - b.min[0]) >= 8 && (b.max[2] - b.min[2]) >= 8;
+    await onStage?.('city/fallback-windows');
+    for (const b of boxes) {
+      if (!winOn(b)) continue;
+      const [x0, y0, z0] = b.min, [x1, y1, z1] = b.max;
+      // faces: [fixed axis, fixed value, u0, u1, v0, v1, outward sign]
+      const faces = [
+        [0, x1 + 0.07, z0, z1, y0, y1], [0, x0 - 0.07, z0, z1, y0, y1],
+        [2, z1 + 0.07, x0, x1, y0, y1], [2, z0 - 0.07, x0, x1, y0, y1],
+      ];
+      for (const [ax, fx, u0, u1, v0, v1] of faces) {
+        for (let fy = v0 + 4; fy + 2.4 < v1; fy += 3) {
+          for (let cu = u0 + 1.6; cu + 2.0 < u1; cu += 2.6) {
+            if (wrnd() < 0.35) continue; // dark units
+            if (winQuads >= CAP) break;
+            const lit = wrnd() < 0.45;
+            const q = (u, v) => ax === 0 ? [fx, v, u] : [u, v, fx];
+            const c = [cu, cu + 1.4];
+            const f = [fy, fy + 1.8];
+            pushQuad(WG, WC, WI, WV, q(c[0], f[0]), q(c[1], f[0]), q(c[1], f[1]), q(c[0], f[1]),
+              lit ? [0.62, 0.66, 0.70] : [0.16, 0.19, 0.24]);
+            if (lit) {
+              const w = 0.9 + wrnd() * 0.25;
+              pushQuad(GG, GC, GI, GV, q(c[0], f[0]), q(c[1], f[0]), q(c[1], f[1]), q(c[0], f[1]),
+                [1.0 * w, 0.72 * w, 0.42 * w]);
+            }
+            winQuads++;
+          }
+          if (winQuads >= CAP) break;
+        }
+        if (winQuads >= CAP) break;
+      }
+      if (winQuads >= CAP) break;
+    }
+    const mkWin = (G, Cc, II, glow) => {
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.Float32BufferAttribute(G, 3));
+      g.setAttribute('color', new THREE.Float32BufferAttribute(Cc, 3));
+      g.setIndex(II); g.computeBoundingSphere();
+      const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide, toneMapped: !glow }));
+      m.frustumCulled = false;
+      return m;
+    };
+    if (WV.n) { winGlass = mkWin(WG, WC, WI, false); winGlass.name = 'fallbackWindows'; root.add(winGlass); }
+    if (GV.n) { winGlow = mkWin(GG, GC, GI, true); winGlow.name = 'fallbackWindowsNight'; winGlow.visible = false; root.add(winGlow); }
+  }
 
   const buildings = boxes.filter(b => b.max[1] > 2).map(b => ({ min: b.min, max: b.max }));
   const footprints = buildings.map(b => ({ x0: b.min[0], z0: b.min[2], x1: b.max[0], z1: b.max[2] }));
@@ -159,9 +236,13 @@ export async function buildFallbackCity({ scene, renderer }, { onStage } = {}) {
       bounds: { x0: -half - 100, z0: -half - 100, x1: half + 100, z1: half + 100 },
       blocks: [], buildings: footprints, streets: [], water: [], parks: [],
     }),
-    update() {},
+    update() {
+      // night glow: one visibility flag per frame, no per-frame allocation.
+      if (winGlow) winGlow.visible = nightK.value > 0.02;
+    },
   };
-  console.log(`[city] fallback mobile city built in ${(performance.now() - t0).toFixed(0)} ms: ${boxes.length} boxes, ${(I.length / 3).toFixed(0)} tris, 0 textures`);
+  console.log(`[city] fallback mobile city built in ${(performance.now() - t0).toFixed(0)} ms: ${boxes.length} boxes, ${(I.length / 3).toFixed(0)} tris, 0 textures` +
+    (Q > 0 ? `, ${winQuads} window quads` : ', fbq=low legacy look'));
   await onStage?.('city/fallback');
   return world;
 }
