@@ -15,6 +15,7 @@
 // Contract: buildRooftops({ scene, gen, facadeMat, T }) -> Promise<{ update(camera), stats }>. Must run BEFORE the tile
 // facade meshes are built (it appends to gen.tiles' builders) and before props (props avoid our solids).
 import * as THREE from 'three';
+import { getQuality, isPotato } from '../render/quality.js';
 import { mulberry32, district, blockAt, ZFIX } from './layout.js';
 import { STYLE, LAYER } from './facade.js';
 import { KIND } from './collision.js';
@@ -52,12 +53,13 @@ const pick = (a, r) => a[Math.floor(r() * a.length)];
 function loadImage(src) {
   return loadImageRetry(src);
 }
-function arrayTex(im, srgbSpace, aniso) {
-  const size = im.width, layers = Math.round(im.height / im.width);
-  const cv = document.createElement('canvas'); cv.width = size; cv.height = im.height;
+function arrayTex(im, srgbSpace, aniso, ts = 1, name = '?') {
+  // (potato) ts = 0.5 halves each axis = 1/4 VRAM; layers follow the aspect ratio, unchanged by uniform scale.
+  const size = Math.max(64, Math.floor(im.width * ts)), layers = Math.round(im.height / im.width);
+  const cv = document.createElement('canvas'); cv.width = size; cv.height = Math.max(64, Math.floor(im.height * ts));
   const cx = cv.getContext('2d', { willReadFrequently: true });
-  cx.drawImage(im, 0, 0);
-  const d = cx.getImageData(0, 0, size, im.height).data;
+  cx.drawImage(im, 0, 0, cv.width, cv.height);
+  const d = cx.getImageData(0, 0, size, cv.height).data;
   const data = new Uint8Array(size * size * 4 * layers);
   for (let L = 0; L < layers; L++) for (let y = 0; y < size; y++) { // flip Y per layer (v = 0 at the bottom)
     const src = ((L * size) + (size - 1 - y)) * size * 4;
@@ -67,6 +69,8 @@ function arrayTex(im, srgbSpace, aniso) {
   t.colorSpace = srgbSpace ? THREE.SRGBColorSpace : THREE.NoColorSpace;
   t.wrapS = t.wrapT = THREE.RepeatWrapping; t.generateMipmaps = true;
   t.minFilter = THREE.LinearMipmapLinearFilter; t.magFilter = THREE.LinearFilter; t.anisotropy = aniso; t.needsUpdate = true;
+  console.log('[city] texture uploaded: ' + name + ' ' + size + 'x' + size + 'x' + layers +
+    ' (~' + (size * size * 4 * layers * 1.33 / 1048576).toFixed(1) + 'MB GPU)');
   return t;
 }
 
@@ -530,9 +534,24 @@ const FAM_WARM = [1.02, 0.99, 0.94], FAM_COOL = [0.92, 0.96, 1.0], FAM_N = [1, 1
 // ------------------------------------------------------------------------------------------ main
 export async function buildRooftops({ scene, gen, facadeMat, T, renderer, extraRoofs = [] }) {
   void facadeMat;
-  const aniso = Math.min(8, renderer?.capabilities?.getMaxAnisotropy?.() ?? 4);
-  const [imC, imN] = await Promise.all([loadImage('/assets/city/tex/roof_col.png'), loadImage('/assets/city/tex/roof_nrm.png')]);
-  const mat = createRoofMaterial(arrayTex(imC, true, aniso), arrayTex(imN, false, aniso), T.noise);
+  const TS = getQuality().texScale || 1;
+  const NO_TEX = new URLSearchParams(location.search).has('notex');
+  const aniso = TS < 1 ? 1 : Math.min(8, renderer?.capabilities?.getMaxAnisotropy?.() ?? 4);
+  let mat;
+  if (NO_TEX) {
+    console.log('[city] ?notex: roof arrays bypassed (1x1 placeholders)');
+    const pa = srgb => {
+      const t = new THREE.DataArrayTexture(new Uint8Array([128, 128, 128, 255]), 1, 1, 1);
+      t.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+      t.needsUpdate = true; return t;
+    };
+    mat = createRoofMaterial(pa(true), pa(false), T.noise);
+  } else {
+    const [imC, imN] = await Promise.all([loadImage('/assets/city/tex/roof_col.png'), loadImage('/assets/city/tex/roof_nrm.png')]);
+    console.log('[city] texture loaded: roof_col ' + imC.width + 'x' + imC.height + ' (~' + (imC.width * imC.height * 4 / 1048576).toFixed(1) + 'MB decoded)');
+    console.log('[city] texture loaded: roof_nrm ' + imN.width + 'x' + imN.height + ' (~' + (imN.width * imN.height * 4 / 1048576).toFixed(1) + 'MB decoded)');
+    mat = createRoofMaterial(arrayTex(imC, true, aniso, TS, 'roof_col'), arrayTex(imN, false, aniso, TS, 'roof_nrm'), T.noise);
+  }
   const aoMat = new THREE.MeshBasicMaterial({ vertexColors: true, blending: THREE.MultiplyBlending, premultipliedAlpha: true, transparent: true,
     depthWrite: false, toneMapped: false, fog: false });
   const skMat = createStreakMaterial(T.noise); // r6: facade rain streaks under the caps
@@ -2250,11 +2269,12 @@ export async function buildRooftops({ scene, gen, facadeMat, T, renderer, extraR
       pm.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse); fr.setFromProjectionMatrix(pm);
       for (const tm of meshes) {
         const d = Math.hypot(Math.max(0, Math.abs(p.x - tm.cx) - 128), Math.max(0, Math.abs(p.z - tm.cz) - 128));
-        const near = tm.near ? d < 690 : d < 650; tm.near = near;
-        rbB.setVisible(tm.i, near); rbB.setShadow(tm.i, d < 230); // (perf) batched tiles
-        if (!warmed && !near && !tm.warm && d < 850) { sp.center.set(tm.cx, 60, tm.cz); sp.radius = 200; if (fr.intersectsSphere(sp)) { if (rbB.warm(tm.i)) warmed = true; else tm.warm = true; } }
-        if (tm.ao) aoB.setVisible(tm.i, d < 520);
-        if (tm.sk) skB.setVisible(tm.i, d < 690);
+        const LD = isPotato() ? 0.5 : 1; // (potato) match city.js tile LOD distances
+        const near = tm.near ? d < 690 * LD : d < 650 * LD; tm.near = near;
+        rbB.setVisible(tm.i, near); rbB.setShadow(tm.i, d < 230 * LD); // (perf) batched tiles
+        if (!warmed && !near && !tm.warm && d < 850 * LD) { sp.center.set(tm.cx, 60, tm.cz); sp.radius = 200; if (fr.intersectsSphere(sp)) { if (rbB.warm(tm.i)) warmed = true; else tm.warm = true; } }
+        if (tm.ao) aoB.setVisible(tm.i, d < 520 * LD);
+        if (tm.sk) skB.setVisible(tm.i, d < 690 * LD);
       }
     },
   };

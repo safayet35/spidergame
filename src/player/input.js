@@ -19,6 +19,7 @@
 //   swing, sprint, walk (Shift only, keyboard), jump, zip, drop, quick, rope (T) (held) + <name>Pressed / <name>Released edge flags, jumpHeld (seconds),
 //   aimT (seconds since the last deliberate camera move), usingPad.
 // Automation: input.press('KeyW' | 'Space' | 'MouseRight' | 'MouseMiddle' ...), input.release(code), input.releaseAll().
+import { createTouch, isTouchDevice } from './touch.js';
 export function createInput(el) {
   const keys = new Set(); const tapped = new Set(); // tapped: keys pressed since last poll (latched so short taps are never lost)
   const mouse = { dx: 0, dy: 0, buttons: 0 };
@@ -33,7 +34,10 @@ export function createInput(el) {
   });
   addEventListener('keyup', e => keys.delete(e.code));
   addEventListener('blur', () => { keys.clear(); mouse.buttons = 0; });
-  el.addEventListener('click', () => { try { el.requestPointerLock?.(); } catch {} });
+  // Touch must never break the boot: a throw here used to mean a black screen.
+  let touch = { active: false, move: { x: 0, y: 0 } };
+  try { touch = createTouch(); } catch (e) { console.warn('[input] touch init failed', e); }
+  el.addEventListener('click', () => { if (isTouchDevice()) return; try { el.requestPointerLock?.(); } catch {} });
   addEventListener('mousemove', e => {
     // release-only resync: a mouseup lost outside the window (no pointer lock) must never leave the web stuck on.
     // (DOM MouseEvent.buttons: 1 left, 2 right, 4 middle — our bits are 1 << e.button: 1 left, 2 middle, 4 right)
@@ -74,6 +78,7 @@ export function createInput(el) {
     if (has('KeyD') || has('ArrowRight')) mx += 1;
     if (has('KeyA') || has('ArrowLeft')) mx -= 1;
     let lx = mouse.dx, ly = mouse.dy; mouse.dx = mouse.dy = 0;
+    if (touch.active) { const tl = touch.consumeLook(); lx += tl.dx; ly += tl.dy; }
     let btn = mouse.buttons | tappedBtn.v; tappedBtn.v = 0;
     for (const [k, b] of Object.entries(BTN)) if (synthetic.has(k)) btn |= b;
     let swing = !!(btn & 4);
@@ -84,6 +89,11 @@ export function createInput(el) {
     let quick = has('KeyQ');
     const rope = has('KeyT');
     let drop = has('KeyC') || has('ControlLeft') || has('ControlRight');
+    if (touch.active) {
+      mx += touch.move.x; my += touch.move.y;
+      swing ||= touch.swing; jump ||= touch.jump; zip ||= touch.zip; drop ||= touch.drop;
+      sprint ||= touch.sprint;
+    }
     const ctrl = keys.has('ControlLeft') || keys.has('ControlRight') || synthetic.has('ControlLeft') || synthetic.has('ControlRight');
     const slingL = !!(sling.tap & 1), slingR = !!(sling.tap & 4); sling.tap = 0;
     let usingPad = false;
@@ -115,7 +125,7 @@ export function createInput(el) {
   }
 
   return {
-    keys, mouse, state, poll, sling,
+    keys, mouse, state, poll, sling, touch,
     press(code) { synthetic.add(code); }, release(code) { synthetic.delete(code); }, releaseAll() { synthetic.clear(); },
     consumeMouse() { const r = { dx: mouse.dx, dy: mouse.dy }; mouse.dx = mouse.dy = 0; return r; },
   };

@@ -18,14 +18,16 @@ import { PLAZA_CROWD_SPOTS } from '../props.js'; // (street r7) forecourt-plaza 
 import { PARK_CROWD_SPOTS } from '../park.js'; // (peds r6) lawn + park-edge people (were box figures in park.js)
 import { GC_CROWD_SPOTS } from '../grandcentral.js'; // (street r7) Park Av podium roof garden + colonnade people
 import { perf2Off } from '../tilebatch.js'; // (perf r2) A/B switch
+import { isPotato } from '../../render/quality.js';
+const POT = isPotato(); // (potato) halve crowd radius + caps
 
-const RP = 270;                 // sidewalk population radius around the camera
-const RNEAR = [120, 160]; /* (street r10) 95/135 -> 120/160 (director: 'many more pedestrians') */        // (street r8) 70/110 -> 95/135: denser sidewalks seen from swing height. near tier (extra walkers + crosswalk corner crowds): populate / release block distance
-const NEAR_KILL = 175; /* (street r10) */ /* (street r8) 125 -> 150 */          // near-tier agents despawn beyond this camera distance
+const RP = POT ? 135 : 270;                 // sidewalk population radius around the camera
+const RNEAR = POT ? [60, 80] : [120, 160]; /* (street r10) 95/135 -> 120/160 (director: 'many more pedestrians') */        // (street r8) 70/110 -> 95/135: denser sidewalks seen from swing height. near tier (extra walkers + crosswalk corner crowds): populate / release block distance
+const NEAR_KILL = POT ? 90 : 175; /* (street r10) */ /* (street r8) 125 -> 150 */          // near-tier agents despawn beyond this camera distance
 const PCELL = 48;               // park streaming cell size
-const RPARK = [210, 250];       // park cell populate / release distance; park agents despawn beyond RPARK[1]
-const LOD_D = [24, 70, 300];    // LOD0 / LOD1 / LOD2 max distance
-const LOD_MAX = [110, 320, 1100];
+const RPARK = POT ? [105, 125] : [210, 250];       // park cell populate / release distance; park agents despawn beyond RPARK[1]
+const LOD_D = POT ? [12, 35, 150] : [24, 70, 300];    // LOD0 / LOD1 / LOD2 max distance
+const LOD_MAX = POT ? [55, 160, 550] : [110, 320, 1100];
 const SLICE2 = !perf2Off('nocrowdopt'); // (perf r2) finer sim time-slicing + cached heights (?nocrowdopt: old path)
 const SPEED_WALK = [0.95, 1.4]; // (peds r2) with the measured clip strides: playback 0.85-1.25 (critic: lockstep / sliding)
 const STRIDE = 1.5;             // metres per walk cycle at scale 1 (clip 'walk' is 32 frames @30fps)

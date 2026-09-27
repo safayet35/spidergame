@@ -23,6 +23,7 @@ import { createSkillFx } from './skillfx.js';
 import { createUI } from '../../ui/menus/ui.js';
 import { createPauseMenu } from '../../ui/menus/pause.js';
 import { createPhotoUI } from '../../ui/menus/photo.js';
+import { isMobileDevice, isPotato } from '../../render/quality.js';
 
 export function initSystems(ctx) {
   if (ctx.sys) return ctx.sys;
@@ -30,6 +31,14 @@ export function initSystems(ctx) {
   if (q.has('shot')) return null; // deterministic screenshot mode: no open-world systems
   const t0 = performance.now();
   const save = createSave();
+  const MOBILE = isMobileDevice();
+  // fresh mobile saves: no motion blur, slightly lower render scale (battery + thermals)
+  try {
+    if (MOBILE && save.state.settings.quality === 'high' && !localStorage.getItem('spidey.save.v1')) {
+      save.state.settings.motionBlur = 0;
+      save.state.settings.renderScale = isPotato() ? 0.75 : 0.85; // (potato) fewer pixels
+    }
+  } catch { /* storage blocked: keep defaults */ }
   // saved graphics preset (quality is chosen from the URL at boot by render/quality.js)
   if (save.persistent && !q.has('q') && save.state.settings.quality && save.state.settings.quality !== 'high') {
     const u = new URL(location.href); u.searchParams.set('q', save.state.settings.quality); location.replace(u.toString()); return null;
@@ -56,7 +65,11 @@ export function initSystems(ctx) {
   sys.skillfx = createSkillFx(ctx);
   sys.towers = createTowers(sys);
   sys.collect = createCollectibles(sys);
-  sys.crimes = createCrimes(sys);
+  // fallback city has no road graph / Manhattan coordinates: crimes would spawn
+  // actors in the void, so the crime sim stays off (traversal/combat unaffected).
+  sys.crimes = ctx.world.isFallback
+    ? { interact: () => null, update: () => {}, pins: () => {}, active: null, enable: () => {}, enabled: false, spawn: () => null }
+    : createCrimes(sys);
   sys.travel = createTravel(sys);
   sys.photo = createPhoto(sys);
   sys.pause = createPauseMenu(sys);
@@ -82,8 +95,9 @@ export function initSystems(ctx) {
     ctx.lighting?.setDryPuddles?.(s.puddles !== false); // (user r-nopuddles)
     if (s.renderScale !== appliedScale) {
       appliedScale = s.renderScale;
-      if (appliedScale !== 1 || ctx.renderer.getPixelRatio() !== Math.min(devicePixelRatio, 1.5)) {
-        ctx.renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5) * s.renderScale);
+      const cap = isMobileDevice() ? 1 : 1.5;
+      if (appliedScale !== 1 || ctx.renderer.getPixelRatio() !== Math.min(devicePixelRatio, cap)) {
+        ctx.renderer.setPixelRatio(Math.min(devicePixelRatio, cap) * s.renderScale);
         ctx.renderer.setSize(innerWidth, innerHeight); ctx.pipeline.setSize?.(innerWidth, innerHeight);
       }
     }

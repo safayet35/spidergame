@@ -1,5 +1,24 @@
-// OWNER: render agent. Quality presets selected with ?q=low|med|high (default high).
+// OWNER: render agent. Quality presets selected with ?q=low|med|high|mobile|potato (default high, auto mobile/potato on phones).
 const PRESETS = {
+  potato: {
+    name: 'potato',
+    cascades: 1, shadowMapSize: 512, shadowFar: 250, splits: [0.1, 250], shadowTaps: 3,
+    ao: false, aoHalfRes: true, aoQuality: 'Performance',
+    cloudSteps: 4, cloudLightSteps: 1, envSize: 32,
+    taa: false, bloomLevels: 2, dofTaps: 0, mbSamples: 0, sharpen: 0.15,
+    charShadow: 0, ssr: false, shafts: false, shaftSteps: 0,
+    ssgi: false, wet: false,
+    texScale: 0.5, renderScale: 0.75,
+  },
+  mobile: {
+    name: 'mobile',
+    cascades: 2, shadowMapSize: 1024, shadowFar: 400, splits: [0.1, 25, 400], shadowTaps: 5,
+    ao: false, aoHalfRes: true, aoQuality: 'Performance',
+    cloudSteps: 8, cloudLightSteps: 2, envSize: 64,
+    taa: false, bloomLevels: 4, dofTaps: 12, mbSamples: 4, sharpen: 0.2,
+    charShadow: 0, ssr: false, shafts: false, shaftSteps: 0,
+    ssgi: false, wet: false,
+  },
   low: {
     name: 'low',
     cascades: 2, shadowMapSize: 1024, shadowFar: 500, splits: [0.1, 30, 500], shadowTaps: 5,
@@ -31,12 +50,35 @@ const PRESETS = {
 };
 
 let _q = null;
+export function isMobileDevice() {
+  try {
+    const ua = navigator.userAgent || '';
+    if (/Android|iPhone|iPad|iPod|Mobile/i.test(ua)) return true;
+    if (matchMedia('(pointer: coarse)').matches && Math.min(screen.width, screen.height) < 820) return true;
+    if (navigator.maxTouchPoints > 0 && (navigator.hardwareConcurrency || 8) <= 4) return true;
+  } catch { /* non-browser */ }
+  return false;
+}
+export function isPotatoDevice() {
+  try {
+    if (new URLSearchParams(location.search).get('q') === 'potato') return true;
+    if (!isMobileDevice()) return false;
+    if ((navigator.hardwareConcurrency || 8) <= 4) return true;
+    if (Math.min(screen.width, screen.height) < 700) return true;
+    if ((navigator.deviceMemory || 8) <= 3) return true;
+  } catch { /* non-browser */ }
+  return false;
+}
+export function isPotato() {
+  try { return getQuality().name === 'potato'; } catch { return false; }
+}
 export function getQuality() {
   if (_q) return _q;
   let name = 'high';
   try {
     const p = new URLSearchParams(location.search).get('q');
     if (p && PRESETS[p]) name = p;
+    else if (!p) name = isPotatoDevice() ? 'potato' : (isMobileDevice() ? 'mobile' : 'high'); // auto tier on phones
     if (p === 'medium') name = 'med';
   } catch (e) { /* non-browser */ }
   _q = { ...PRESETS[name] };

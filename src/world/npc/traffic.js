@@ -15,11 +15,13 @@ import { registry, curbBlocked } from './registry.js';
 import { createContactAO, createHeadlightPools } from '../contactao.js'; // (daynight) + headlight pools // (street r7) contact AO decals under cars
 import { csmShared, SHADOW_PROXY_LAYER } from '../../render/csm.js'; // (perf r2) shadow proxies
 import { perf2Off } from '../tilebatch.js'; // (perf r2) A/B switch
+import { isPotato } from '../../render/quality.js';
+const POT = isPotato(); // (potato) halve traffic radius + density
 
-const RA = 640;            // streaming radius (m)
-const PARK_R = 500;        // parked cars exist on links within this radius ((citylife r2) 420 -> 500: no pop-in seen from rooftops, inside the haze)
-const HI_D = 48, LOW_D = 230; // (vehicles r1) LOD0 (~5.5k tris) < 48 m, LOD1 (~1.1k) < 230 m, LOD2 (~160, grouped) beyond
-const MAX_CARS = 2600;
+const RA = POT ? 320 : 640;            // streaming radius (m)
+const PARK_R = POT ? 250 : 500;        // parked cars exist on links within this radius ((citylife r2) 420 -> 500: no pop-in seen from rooftops, inside the haze)
+const HI_D = POT ? 24 : 48, LOW_D = POT ? 115 : 230; // (vehicles r1) LOD0 (~5.5k tris) < 48 m, LOD1 (~1.1k) < 230 m, LOD2 (~160, grouped) beyond
+const MAX_CARS = POT ? 1300 : 2600;
 const A = 2.0, B = 3.2, S0 = 2.0, TH = 1.1;
 const PLAYER_R = 0.5;        // player body half-width used by drivers (arms + stance), metres
 // (citylife junctions) user: 'reduce car density by a bit' -> open gaps between platoons x1.3 (~-18 % cars); the authored
@@ -29,6 +31,7 @@ const PLAYER_R = 0.5;        // player body half-width used by drivers (arms + s
 // (the edge inflow can't replace the cars driving out of the 640 m radius: ~1000 cars at load -> ~320 after 5 min with the
 // camera parked), so a stationary view emptied out whatever the spawn gaps were. The refill below tops links up out of view.
 const DENSITY = { av: 31, st: 44, ws: 20, dg: 41, dg1: 80, map: 27, br: 31 }; // br: bridge decks (roads.js BRIDGE_DENSITY) // dg1: one-way lower Broadway (2 lanes carry what 4 did)
+if (POT) for (const k in DENSITY) DENSITY[k] = Math.max(4, Math.ceil(DENSITY[k] / 2)); // (potato) halve cars
 let densityScale = 1; // api.setDensity(k): scales DENSITY
 
 export const VTYPES = {

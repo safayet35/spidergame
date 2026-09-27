@@ -4,8 +4,9 @@
 import * as THREE from 'three';
 import { G, mulberry32, inPark, shoreX } from '../layout.js';
 import { MB } from '../geom.js';
+import { isPotato } from '../../render/quality.js';
 
-const R_SIM = 160, MAX = 700;
+const R_SIM = isPotato() ? 80 : 160, MAX = isPotato() ? 250 : 700; // (potato) fewer birds
 
 function birdGeometry() {
   const b = new MB();

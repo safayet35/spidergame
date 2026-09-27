@@ -18,6 +18,7 @@ import { bridgeSpans } from './bridges.js';
 import { REFL_LAYER } from './water.js';
 import { CanopyBatch } from './canopy.js';
 import { farCoastOwns, COAST } from './waterfront.js'; // (coast r1) near banks rebuilt by waterfront.js
+import { isPotato } from '../render/quality.js'; // (potato) shrink far bands
 
 export const FAR_Y = 1.2;
 // polygons [[x, z], ...]
@@ -131,8 +132,8 @@ function gridFor(name, z) {
 const ART_SX = 1100, ART_SZ = 950, ART_H = 13;
 const artX = (x) => Math.round((x - 350) / ART_SX) * ART_SX + 350, artZ = (z) => Math.round((z - 180) / ART_SZ) * ART_SZ + 180;
 const nearLand = (x, z) => FAR_LANDS.find(L => (L.name === 'nj' || L.name === 'east') && x >= L.bb[0] && x <= L.bb[2] && z >= L.bb[1] && z <= L.bb[3] && pointInPoly(L.pts, x, z));
-const NEAR = 1500;       // facade boxes (with collision) out to this distance from Manhattan
-const FAR = 4300;        // massed blocks out to this distance (beyond: only the ground map)
+const NEAR = isPotato() ? 750 : 1500;       // facade boxes (with collision) out to this distance from Manhattan
+const FAR = isPotato() ? 2150 : 4300;        // massed blocks out to this distance (beyond: only the ground map)
 const MAP = { x0: -6000, x1: 6000, z0: -7600, z1: 9000, px: 5 }; // ground-map coverage, metres per pixel
 
 export function buildFarShore({ scene, facadeMat, solids = null }) {

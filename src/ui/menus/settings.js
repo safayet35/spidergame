@@ -19,7 +19,7 @@ export function createSettingsPage(sys) {
   function render() {
     el.querySelectorAll('.cats .sys-list-item').forEach(n => n.classList.toggle('on', n.dataset.c === cat));
     if (cat === 'graphics') main.innerHTML = `<div class="sys-h3">Graphics</div>
-      ${seg('quality', [['low', 'Low'], ['med', 'Medium'], ['high', 'High']], 'Quality Preset', `Shadows, AO, clouds, DoF samples. Applying reloads the game (current: ${curQ}).`)}
+      ${seg('quality', [['potato', 'Potato'], ['mobile', 'Mobile'], ['low', 'Low'], ['med', 'Medium'], ['high', 'High']], 'Quality Preset', `Shadows, AO, clouds, DoF samples. Applying reloads the game (current: ${curQ}).`)}
       ${range('renderScale', 0.6, 1.25, 0.05, 'Render Resolution', 'Internal resolution scale. Lower for more FPS.', FMT.renderScale)}
       ${seg('timeOfDay', [['day', 'Day'], ['morning', 'Morning'], ['sunrise', 'Sunrise'], ['sunset', 'Sunset'], ['dusk', 'Dusk'], ['night', 'Night'], ['overcast', 'Overcast']], 'Time of Day', 'Hand-tuned lighting preset')}
       ${seg('daySun', [['a', 'Midday'], ['b', 'Late Morning'], ['c', 'Afternoon']], 'Day Sun', 'Sun direction for the Day preset (shadow angle)')}

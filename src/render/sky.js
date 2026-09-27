@@ -319,8 +319,8 @@ export function createSky(renderer, quality) {
     },
   });
 
-  // 3D noise (generated on GPU once)
-  const NS = 128;
+  // 3D noise (generated on GPU once). (potato) 64^3 = 1 MB instead of 8 MB.
+  const NS = quality.envSize >= 64 ? 128 : 64;
   const noiseRT = new THREE.WebGL3DRenderTarget(NS, NS, NS, {
     type: THREE.UnsignedByteType, format: THREE.RGBAFormat, depthBuffer: false,
   });
@@ -509,7 +509,7 @@ void main() {
   const envMesh = new THREE.Mesh(new THREE.BoxGeometry(10, 10, 10), envMat);
   envMesh.frustumCulled = false;
   envScene.add(envMesh);
-  const cubeRT = new THREE.WebGLCubeRenderTarget(256, { type: THREE.HalfFloatType, generateMipmaps: false });
+  const cubeRT = new THREE.WebGLCubeRenderTarget(quality.envSize >= 64 ? 256 : 128, { type: THREE.HalfFloatType, generateMipmaps: false });
   const cubeCam = new THREE.CubeCamera(0.1, 100, cubeRT);
   envScene.add(cubeCam);
   const pmrem = new THREE.PMREMGenerator(renderer);

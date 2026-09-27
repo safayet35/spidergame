@@ -32,13 +32,30 @@ import { buildSignage } from './signage.js'; // billboards: city-wide signage
 import { attachLife } from './npc/life.js';
 import { applyDistanceFade } from './pool.js';
 import { batchTiles } from './tilebatch.js'; // (perf)
+import { isPotato, isMobileDevice } from '../render/quality.js'; // (potato) halve LOD distances; chunked mobile build
 
-export async function buildCity({ scene, renderer }) {
+export async function buildCity({ scene, renderer }, { onStage, nodetail = false } = {}) {
   const t0 = performance.now();
-  const T = await loadCityTextures(renderer);
+  // ?stopafter=city/<stage>: halt the build after a stage and boot with the
+  // partial scene (temporary geometry/CPU isolation: binary-search the crash).
+  const stopAfter = new URLSearchParams(location.search).get('stopafter');
+  let halted = null;
+  const partialWorld = () => ({ raycast: () => null, groundHeight: () => 0, surfaceAt: () => null,
+    spawn: new THREE.Vector3(0, 0.5, 0), viewpoints: {}, streetsAt: () => ({ type: 'block' }),
+    buildings: [], update() {} });
+  async function cs(name) {
+    await onStage?.('city/' + name);
+    if (stopAfter === name || stopAfter === 'city/' + name) {
+      console.log('[city] ?stopafter=' + name + ': halting build, booting partial scene');
+      halted = name;
+    }
+  }
+  const T = await loadCityTextures(renderer, { onStage });
+  await cs('tex'); if (halted) return partialWorld();
   const facadeMat = createFacadeMaterial(T);
   const detailMat = createDetailMaterial(T);
-  applyDistanceFade(detailMat, 320, 450); // citylife: small facade details dissolve 320-450 m; tiles hidden beyond (no pop)
+  const LD = isPotato() ? 0.5 : 1; // (potato) LOD distance multiplier: ~4x fewer full tiles resident
+  applyDistanceFade(detailMat, 320 * LD, 450 * LD); // citylife: small facade details dissolve 320-450 m; tiles hidden beyond (no pop)
 
   const TT = [], tick = (n) => TT.push(n + ' ' + (performance.now() - t0).toFixed(0));
   tick('tex');
@@ -59,6 +76,7 @@ export async function buildCity({ scene, renderer }) {
     ],
   });
   tick('gen');
+  await cs('gen'); if (halted) return partialWorld();
   const sqd = dressSquares(gen, blocks); console.log('[city] (layout2 r4) square dressing', JSON.stringify(sqd)); // Broadway bow-tie plazas
   const heroRect = gen.excluded[0] ? { ...gen.excluded[0], x0: HERO_RECT.x0 } : HERO_RECT;
   const root = new THREE.Group(); root.name = 'city';
@@ -66,49 +84,79 @@ export async function buildCity({ scene, renderer }) {
   buildStandalone({ scene: root, gen, T }); // citygeo: Grand Central, Times-Square screens (writes into the tile builders)
   buildTimesSquare({ scene: root, gen }); // timessq: screens, plazas, TKTS steps, One-Times-Square tower (writes into the tile builders)
   const rooftops = await buildRooftops({ scene: root, gen, facadeMat, T, renderer, extraRoofs: [{ rect: heroRect, H: 96 }] }); // rooftops: roof skins, penthouses, clutter (writes into the tile builders)
+  await cs('rooftops'); if (halted) return partialWorld();
   const signage = buildSignage({ scene: root, gen }); // billboards: rooftop billboards, wall ads, blade signs, LED corners (steel -> detail tiles)
+  await cs('signage'); if (halted) return partialWorld();
   const tileMeshes = [];
   // (perf) the far-LOD tiles are grouped into 2x2 super-tiles (tilebatch.js): one draw per super-tile while all its
   // tiles are far (the far cascades drew ~180 facadeLod tiles). Same per-tile show / hide -> no visible change. Facade /
   // detail tiles stay one mesh each (merged copies of those raised the build's peak memory -> renderer tab crash).
-  const facG = [], lodG = [], detG = [];
-  for (const t of gen.tiles.values()) {
-    const i = tileMeshes.length;
-    facG[i] = t.fac.build(); lodG[i] = t.lod.build(); // far LOD (bare masses): shown beyond ~650 m instead of the full tile
-    detG[i] = t.det.v ? t.det.build({ part: true }) : null;
-    tileMeshes.push({ i, mesh: !!detG[i], fac: !!facG[i], lod: !!lodG[i], cx: t.cx, cz: t.cz, far: 900, near: true });
-    // (street r3) release the builders' JS number arrays as each tile is converted to typed arrays: the renderer hit the
-    // V8 heap limit here ('V8 javascript OOM (CALL_AND_RETRY_LAST)' at ~3.3 GB, every page crashed after [rooftops])
-    t.fac = t.lod = t.det = null;
+  // (potato) chunked build+batch: only CHUNK tiles of built geometry are ever resident (desktop builds all at once,
+  // unchanged). Chunking only splits LOD super-tiles at chunk borders (a few extra draws); per-tile API is identical.
+  const CHUNK = (nodetail || isMobileDevice()) ? 8 : Infinity;
+  const tileList = [...gen.tiles.values()];
+  const facBatches = [], lodBatches = [], detBatches = [];
+  const findBatch = (batches, i) => { for (const e of batches) if (i >= e.base && i < e.base + e.n) return [e.b, i - e.base]; return null; };
+  const proxyBatch = batches => ({
+    meshes: batches.flatMap(e => e.b.meshes),
+    has: i => { const f = findBatch(batches, i); return f ? f[0].has(f[1]) : false; },
+    setVisible(i, v) { const f = findBatch(batches, i); if (f) f[0].setVisible(f[1], v); },
+    setShadow(i, v) { const f = findBatch(batches, i); if (f) f[0].setShadow(f[1], v); },
+    warm(i) { const f = findBatch(batches, i); return f ? f[0].warm(f[1]) : false; },
+    endWarm() { for (const e of batches) e.b.endWarm(); },
+  });
+  for (let s = 0; s < tileList.length; s += CHUNK) {
+    const slice = tileList.slice(s, s + CHUNK);
+    const facG = [], lodG = [], detG = [];
+    slice.forEach((t, k) => {
+      const i = s + k;
+      facG[k] = t.fac.build(); lodG[k] = t.lod.build(); // far LOD (bare masses): shown beyond ~650 m instead of the full tile
+      // (potato/?nodetail) skip small-fragment detail tiles: worst build-time heap offender (plain JS arrays) + GPU.
+      detG[k] = (!nodetail && t.det.v) ? t.det.build({ part: true }) : null;
+      tileMeshes.push({ i, mesh: !!detG[k], fac: !!facG[k], lod: !!lodG[k], cx: t.cx, cz: t.cz, far: 900, near: true });
+      // (street r3) release the builders' JS number arrays as each tile is converted to typed arrays: the renderer hit the
+      // V8 heap limit here ('V8 javascript OOM (CALL_AND_RETRY_LAST)' at ~3.3 GB, every page crashed after [rooftops])
+      t.fac = t.lod = t.det = null;
+    });
+    const ctr = slice.map(t => [t.cx, t.cz]);
+    facBatches.push({ b: batchTiles(facG, facadeMat, 'facade', { castShadow: true, receiveShadow: true, merge: false }, ctr), base: s, n: slice.length }); // (perf) big: per tile
+    lodBatches.push({ b: batchTiles(lodG, facadeMat, 'facadeLod', { castShadow: true, receiveShadow: true }, ctr), base: s, n: slice.length });
+    detBatches.push({ b: batchTiles(detG, detailMat, 'detail', { castShadow: true, receiveShadow: true, merge: false }, ctr), base: s, n: slice.length });
+    // batchTiles consumes the built geometries (merged or referenced, sources nulled): peak stays at ~CHUNK tiles.
+    if (onStage) await onStage('city/tiles ' + Math.min(s + CHUNK, tileList.length) + '/' + tileList.length);
   }
-  const ctr = tileMeshes.map(t => [t.cx, t.cz]);
-  const facB = batchTiles(facG, facadeMat, 'facade', { castShadow: true, receiveShadow: true, merge: false }, ctr); // (perf) big: per tile
-  const lodB = batchTiles(lodG, facadeMat, 'facadeLod', { castShadow: true, receiveShadow: true }, ctr);
-  const detB = batchTiles(detG, detailMat, 'detail', { castShadow: true, receiveShadow: true, merge: false }, ctr);
+  const facB = proxyBatch(facBatches), lodB = proxyBatch(lodBatches), detB = proxyBatch(detBatches);
   for (const b of [facB, lodB, detB]) for (const m of b.meshes) root.add(m);
   for (const tm of tileMeshes) if (tm.lod) lodB.setVisible(tm.i, false);
   tick('tiles');
+  await cs('tiles'); if (halted) return partialWorld();
   const hero = buildHero({ scene: root, rect: heroRect, facadeMat, renderer, solids: gen.solids, zips: gen.zips });
   gen.boxes.push(hero.box); gen.footprints.push(hero.footprint);
   const ground = buildGround({ scene: root, T, blocks, facadeMat, solids: gen.solids, zips: gen.zips, renderer });
   buildPark({ scene: root, facadeMat, solids: gen.solids, zips: gen.zips, meadowDist, parkPaths: ground.parkPaths }); // park agent: Met-like museum + schist outcrops
   tick('ground');
+  await cs('ground'); if (halted) return partialWorld();
   const far = buildFarShore({ scene: root, facadeMat, solids: gen.solids });
   tick('far');
+  await cs('far'); if (halted) return partialWorld();
   const bridges = buildBridges({ scene: root, T, solids: gen.solids, zips: gen.zips, boxes: gen.boxes }); // foundation: East River bridges (bridges r1: + anchor boxes)
   tick('bridges');
+  await cs('bridges'); if (halted) return partialWorld();
   // foundation: distant hinterland out to the horizon + wet tidal bands along every seawall / bulkhead
   const hinter = buildHinterland({ scene: root });
   buildWetBands({ scene: root, T, segs: [...(ground.wetSegs ?? []), ...(far.wetSegs ?? [])] });
   tick('hinterland ' + hinter.count);
+  await cs('hinterland'); if (halted) return partialWorld();
   const boats = buildBoats({ scene: root, solids: gen.solids, // foundation: river traffic + wakes (+ round 12: moored boats at the piers)
     docks: [...PIERS, ...(far.piers ?? []).map(([x0, z0, x1, z1]) => ({ x0, z0, x1, z1 }))] });
   const vehModels = await loadVehicleModels(renderer); // (bridges r3) shared by the highways and the street traffic
   const highways = buildHighways({ scene: root, T, solids: gen.solids, models: vehModels }); // foundation: West Side Highway / FDR + traffic ((bridges r3) real vehicles + real trees)
+  await cs('vehicles'); if (halted) return partialWorld();
   // (citylife bridges) bridge cars are ordinary street traffic now (collidable, junction rules, same models): no bridgeTraffic
   const nSolidsPre = gen.solids.count; // citygeo: props' solids start here (refit below)
   const props = await buildProps({ scene: root, blocks, parkPaths: ground.parkPaths, T, solids: gen.solids, buildings: gen.buildings }); // citylife
   tick('props');
+  await cs('props'); if (halted) return partialWorld();
   { // (bridges r3) bridge ramp mouths: no street furniture / trees on the apron, the ramp foot or the joined street's
     // sidewalks and parking lanes at the T (lamps, signal masts / posts stay). Parked cars: npc/roads.js bridgeJunctions.
     const K = bridgeKeepOuts(), inR = (r, x, z) => x > r.x0 && x < r.x1 && z > r.z0 && z < r.z1;
@@ -159,8 +207,10 @@ export async function buildCity({ scene, renderer }) {
   const trees = buildTrees({ scene: root, T, spots: props.treeSpots, parkPaths: ground.parkPaths });
   const traffic = buildTraffic({ scene: root, phase: props.phase, models: vehModels });
   const peds = await buildPeds({ scene: root, blocks, parkPaths: ground.parkPaths, props, traffic }); // citylife
+  await cs('peds'); if (halted) return partialWorld();
   const flags = buildFlags({ scene: root, flags: gen.buildings.flags });
   tick('life');
+  await cs('life'); if (halted) return partialWorld();
   let time = 0;
   let _fr = null, _pm = null, _sp = null; // (perf r2) tile pre-upload frustum
 
@@ -187,6 +237,7 @@ export async function buildCity({ scene, renderer }) {
   const { groundHeight, raycast, surfaceAt } = makeQueries(grid, terrainHeight);
   const geoDebug = createGeoDebug(root, grid, zips, collisionDebugLines);
   tick('coll');
+  await cs('coll'); if (halted) return partialWorld();
 
   const spawn = new THREE.Vector3(250, 0, 160 + G.ST_HALF + 2.3); // on the centre line, in the south crosswalk
   const viewpoints = makeViewpoints(gen, spawn, hero);
@@ -253,12 +304,12 @@ export async function buildCity({ scene, renderer }) {
         _pm.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse); _fr.setFromProjectionMatrix(_pm);
         for (const tm of tileMeshes) { // citylife: nearest-point tile distance; details dissolve by 450 m, cast shadows near only
           const d = Math.hypot(Math.max(0, Math.abs(camera.position.x - tm.cx) - 128), Math.max(0, Math.abs(camera.position.z - tm.cz) - 128));
-          if (tm.mesh) { detB.setVisible(tm.i, d < 450); detB.setShadow(tm.i, d < 160); } // (perf) batched tiles
+          if (tm.mesh) { detB.setVisible(tm.i, d < 450 * LD); detB.setShadow(tm.i, d < 160 * LD); } // (perf) batched tiles
           // citygeo: full facade tile near, bare-mass LOD far (hysteresis 40 m)
-          if (tm.lod) { const near = tm.near ? d < 690 : d < 650; tm.near = near; if (tm.fac) facB.setVisible(tm.i, near); lodB.setVisible(tm.i, !near); }
+          if (tm.lod) { const near = tm.near ? d < 690 * LD : d < 650 * LD; tm.near = near; if (tm.fac) facB.setVisible(tm.i, near); lodB.setVisible(tm.i, !near); }
           // (perf r2) pre-upload the tile about to appear (one vertex buffer per frame, tiles inside the view frustum
           // first), so the swap at 650-690 m / 450 m does not upload ~15-20 MB in one frame (100-150 ms hitches)
-          if (!warmed && d < 850 && ((tm.fac && !tm.warmF && !tm.near) || (tm.mesh && !tm.warmD && d >= 450 && d < 600))) {
+          if (!warmed && d < 850 * LD && ((tm.fac && !tm.warmF && !tm.near) || (tm.mesh && !tm.warmD && d >= 450 * LD && d < 600 * LD))) {
             _sp.center.set(tm.cx, 60, tm.cz); _sp.radius = 200;
             if (_fr.intersectsSphere(_sp)) {
               if (tm.fac && !tm.warmF && !tm.near) { if (facB.warm(tm.i)) warmed = true; else tm.warmF = true; } // one buffer per frame

@@ -49,19 +49,29 @@ export function createPipeline({ renderer, scene, camera, lighting }) {
   let W = size.x, H = size.y;
 
   // ---------------------------------------------------------------- targets
+  // (mobile) targets for disabled features are 4x4 dummies, not full-res RTs:
+  // the passes are all gated on these flags, so the textures are only ever
+  // bound as (unused) uniforms when off. Saves ~100 MB on the mobile preset.
+  const hasAO = !!Q.ao, hasTAA = !!Q.taa, hasSSR = !!Q.ssr, hasShafts = !!Q.shafts, hasSSGI = Q.ssgi !== false;
+  const tinyRT = () => makeRT(4, 4);
   const depthTex = new THREE.DepthTexture(W, H, reversed ? THREE.FloatType : THREE.UnsignedIntType);
   depthTex.format = THREE.DepthFormat;
   depthTex.minFilter = depthTex.magFilter = THREE.NearestFilter;
   const sceneRT = makeRT(W, H, { depthBuffer: true, depthTexture: depthTex });
   sceneRT.texture.minFilter = sceneRT.texture.magFilter = THREE.LinearFilter;
-  const aoRT = makeRT(W, H);
+  const aoRT = hasAO ? makeRT(W, H) : tinyRT();
   const skyRT = makeRT(W / 2, H / 2);
   const litRT = makeRT(W, H);
-  const hist = [makeRT(W, H), makeRT(W, H)];
-  const postA = makeRT(W, H), postB = makeRT(W, H);
-  const dofHalfA = makeRT(W / 2, H / 2), dofHalfB = makeRT(W / 2, H / 2);
-  const ssrRT = makeRT(W / 2, H / 2);       // rgb: (reflection - env) * confidence (signed, half float)
-  const shaftRT = makeRT(W / 2, H / 2);     // rgb: sun in-scatter along the view ray (shadowed), a: linear depth
+  const hist = hasTAA ? [makeRT(W, H), makeRT(W, H)] : [tinyRT(), tinyRT()];
+  // (potato) the DoF/motion-blur chain never runs when both are compiled out,
+  // so the ping-pong targets are dummies too. See the Q.dofTaps/Q.mbSamples
+  // gates on the passes below: tiny targets are never rendered into.
+  const hasPost = (Q.dofTaps || 0) > 0 || (Q.mbSamples || 0) > 0;
+  const hasDof = (Q.dofTaps || 0) > 0;
+  const postA = hasPost ? makeRT(W, H) : tinyRT(), postB = hasPost ? makeRT(W, H) : tinyRT();
+  const dofHalfA = hasDof ? makeRT(W / 2, H / 2) : tinyRT(), dofHalfB = hasDof ? makeRT(W / 2, H / 2) : tinyRT();
+  const ssrRT = hasSSR ? makeRT(W / 2, H / 2) : tinyRT();       // rgb: (reflection - env) * confidence (signed, half float)
+  const shaftRT = hasShafts ? makeRT(W / 2, H / 2) : tinyRT();     // rgb: sun in-scatter along the view ray (shadowed), a: linear depth
   const sunVisRT = makeRT(1, 1, { filter: THREE.NearestFilter }); // r: sun visibility (lens flare)
   // auto exposure: r = adapted log2 luminance (ping-pong 1x1), g = this frame's metered value
   const aeRT = [makeRT(1, 1, { filter: THREE.NearestFilter, type: THREE.FloatType }), makeRT(1, 1, { filter: THREE.NearestFilter, type: THREE.FloatType })];
@@ -69,9 +79,11 @@ export function createPipeline({ renderer, scene, camera, lighting }) {
   // character mask: depth of the player's meshes only (same jittered camera as the scene). TAA compares it with
   // the scene depth to find character pixels and reprojects those with the character's own rigid motion instead
   // of the camera motion (chase-cam swinging otherwise smears / ghosts the suit).
-  const maskDepth = new THREE.DepthTexture(W, H, reversed ? THREE.FloatType : THREE.UnsignedIntType);
+  const maskDepth = new THREE.DepthTexture(hasTAA ? W : 4, hasTAA ? H : 4, reversed ? THREE.FloatType : THREE.UnsignedIntType);
   maskDepth.format = THREE.DepthFormat; maskDepth.minFilter = maskDepth.magFilter = THREE.NearestFilter;
-  const maskRT = makeRT(W, H, { depthBuffer: true, depthTexture: maskDepth, type: THREE.UnsignedByteType, filter: THREE.NearestFilter });
+  const maskRT = hasTAA
+    ? makeRT(W, H, { depthBuffer: true, depthTexture: maskDepth, type: THREE.UnsignedByteType, filter: THREE.NearestFilter })
+    : tinyRT();
   const maskMat = new THREE.MeshBasicMaterial({ colorWrite: false });
   const objPrev = new THREE.Matrix4(), objCur = new THREE.Matrix4(), objDelta = new THREE.Matrix4();
   let objHave = false;
@@ -296,7 +308,7 @@ void main() {
   // E_sun uses the real CSM visibility + N.L and E_amb the env irradiance, so composite does col *= 1 + ratio. Shaded
   // walls opposite a sunlit facade / street get the warm coloured bounce; sunlit pixels barely change.
   const ssgiOn = Q.ssgi !== false && !params.has('nossgi');
-  const ssgiRT = makeRT(W / 2, H / 2);
+  const ssgiRT = hasSSGI ? makeRT(W / 2, H / 2) : tinyRT();
   const ssgi = new FSPass({
     name: 'ssgi',
     defines: { DIRS: Q.ssgiDirs || 6, STEPS: Q.ssgiSteps || 4, NC, ENVMAP_TYPE_CUBE_UV: '', CUBEUV_TEXEL_WIDTH: 0.0013, CUBEUV_TEXEL_HEIGHT: 0.001953125, CUBEUV_MAX_MIP: '7.0' },
@@ -1112,12 +1124,17 @@ void main() { vec4 t = texture(uSrc, vUv); vec3 c = uMode > 0.5 ? vec3(t.a - 1.0
     const pr = renderer.getPixelRatio();
     W = Math.max(1, Math.floor(w * pr)); H = Math.max(1, Math.floor(h * pr));
     sceneRT.setSize(W, H); depthTex.image.width = W; depthTex.image.height = H;
-    aoRT.setSize(W, H); litRT.setSize(W, H); hist[0].setSize(W, H); hist[1].setSize(W, H);
-    postA.setSize(W, H); postB.setSize(W, H);
-    skyRT.setSize(W >> 1, H >> 1); dofHalfA.setSize(W >> 1, H >> 1); dofHalfB.setSize(W >> 1, H >> 1);
-    ssrRT.setSize(W >> 1, H >> 1); shaftRT.setSize(W >> 1, H >> 1); ssgiRT.setSize(W >> 1, H >> 1);
+    if (hasAO) aoRT.setSize(W, H);
+    litRT.setSize(W, H);
+    if (hasTAA) { hist[0].setSize(W, H); hist[1].setSize(W, H); }
+    if (hasPost) { postA.setSize(W, H); postB.setSize(W, H); }
+    skyRT.setSize(W >> 1, H >> 1);
+    if (hasDof) { dofHalfA.setSize(W >> 1, H >> 1); dofHalfB.setSize(W >> 1, H >> 1); }
+    if (hasSSR) ssrRT.setSize(W >> 1, H >> 1);
+    if (hasShafts) shaftRT.setSize(W >> 1, H >> 1);
+    if (hasSSGI) ssgiRT.setSize(W >> 1, H >> 1);
     gmirror?.setSize(W, H);
-    maskRT.setSize(W, H); maskDepth.image.width = W; maskDepth.image.height = H;
+    if (hasTAA) { maskRT.setSize(W, H); maskDepth.image.width = W; maskDepth.image.height = H; }
     allocBloom();
     if (ao) ao.setSize(W, H);
     resetHistory = true;
@@ -1353,7 +1370,7 @@ void main() { vec4 t = texture(uSrc, vUv); vec3 c = uMode > 0.5 ? vec3(t.a - 1.0
 
     let pp = [postA, postB], ppi = 0;
     // --- DoF
-    if (dofState.aperture > 0.01) {
+    if (Q.dofTaps > 0 && dofState.aperture > 0.01) {
       prof.begin('dof');
       updateCoc(dofPre.uniforms, cam);
       dofPre.uniforms.uColor.value = cur.texture;
@@ -1374,7 +1391,7 @@ void main() { vec4 t = texture(uSrc, vUv); vec3 c = uMode > 0.5 ? vec3(t.a - 1.0
     }
 
     // --- motion blur
-    if (mbState.strength > 0.001 && (mbState.fade > 0.001 || mbState.velocity || mbState.angular)) {
+    if (Q.mbSamples > 0 && mbState.strength > 0.001 && (mbState.fade > 0.001 || mbState.velocity || mbState.angular)) {
       let pvp = prevViewProj;
       if (mbState.velocity || mbState.angular) {
         // synthetic previous camera: undo `velocity * (1/60)` translation and `angular * (1/60)` rotation
