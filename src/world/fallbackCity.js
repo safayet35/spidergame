@@ -71,11 +71,12 @@ function pushQuad(P, C, I, V, a, b, c, d, col) {
   V.n = base + 4;
 }
 
-export async function buildFallbackCity({ scene, renderer }, { onStage, fbq = 'med' } = {}) {
+export async function buildFallbackCity({ scene, renderer }, { onStage, fbq = 'high' } = {}) {
   void renderer;
   // fbq=low renders the original stable output exactly (legacy palette, no
-  // jitter/base/windows). Guaranteed rollback: ?city=fallback&fbq=low.
-  const Q = fbq === 'low' ? 0 : 2;
+  // jitter/base/windows). fbq=med adds batch-1 materials+windows.
+  // Guaranteed rollback: ?city=fallback&fbq=low.
+  const Q = fbq === 'low' ? 0 : fbq === 'med' ? 1 : 2;
   const t0 = performance.now();
   const rnd = mulberry32(1234);
   const root = new THREE.Group(); root.name = 'fallbackCity';
@@ -137,6 +138,73 @@ export async function buildFallbackCity({ scene, renderer }, { onStage, fbq = 'm
   ground.rotation.x = -Math.PI / 2; ground.position.y = -0.05;
   ground.receiveShadow = true;
   root.add(ground);
+
+  // Stage 3+4 (fbq=high only): street paint + lamps + landmarks, all merged
+  // into the main arrays (+0 draws, +0 materials). Lamp poles and landmark
+  // solids join boxes[] (collision/anchors); flat paint does not.
+  let nPaint = 0, nLamp = 0, nMark = 0;
+  const tallRoofs = []; // {x, z, y} candidates for water towers / antenna
+  if (Q >= 2) {
+    await onStage?.('city/fallback-streets');
+    const PAINT = [0.72, 0.72, 0.68], POLE = [0.18, 0.19, 0.22];
+    // center dashes along every street (streets at cell offsets 0..13)
+    for (let b = 0; b <= N; b++) {
+      const c = -half + b * PITCH + 6.5;
+      for (let s = -half + 6; s < half - 6; s += 12) {
+        pushBox(P, C, I, V, c - 0.18, 0, s, c + 0.18, 0.05, s + 3, PAINT, PAINT); nPaint++;
+        pushBox(P, C, I, V, s, 0, c - 0.18, s + 3, 0.05, c + 0.18, PAINT, PAINT); nPaint++;
+      }
+    }
+    // crosswalk stripes at every other intersection
+    for (let bx = 0; bx < N; bx += 2) for (let bz = 0; bz < N; bz += 2) {
+      const cx = -half + bx * PITCH + 6.5, cz = -half + bz * PITCH + 6.5;
+      for (let k = -2; k <= 2; k++) {
+        pushBox(P, C, I, V, cx + k * 1.1 - 0.35, 0, cz - 3, cx + k * 1.1 + 0.35, 0.05, cz + 3, PAINT, PAINT); nPaint++;
+      }
+    }
+    // lamp poles at every other intersection corner (collidable)
+    for (let bx = 0; bx <= N; bx += 2) for (let bz = 0; bz <= N; bz += 2) {
+      const lx = -half + bx * PITCH + 11.5, lz = -half + bz * PITCH + 11.5;
+      if (Math.abs(lx) > half + 40 || Math.abs(lz) > half + 40) continue;
+      boxes.push({ min: [lx - 0.15, 0, lz - 0.15], max: [lx + 0.15, 7, lz + 0.15] });
+      pushBox(P, C, I, V, lx - 0.15, 0, lz - 0.15, lx + 0.15, 7, lz + 0.15, POLE, POLE); nLamp++;
+      pushBox(P, C, I, V, lx - 0.15, 6.8, lz - 2.2, lx + 0.15, 7, lz + 0.15, POLE, POLE); nLamp++;
+    }
+
+    // Stage 4: 5 low-poly landmarks, merged (+0 draws). Water towers ride the
+    // tallest wide roofs; billboard + hero tower at fixed clear spots.
+    const WOOD = [0.45, 0.33, 0.24], STEEL = [0.35, 0.5, 0.68], SIGN = [0.95, 0.85, 0.70];
+    const cands = boxes.filter(b => {
+      const w = b.max[0] - b.min[0], d = b.max[2] - b.min[2], h = b.max[1] - b.min[1];
+      return b.max[1] > 50 && w >= 10 && w <= 34 && d >= 10 && d <= 34 && h > 10;
+    }).sort((a, b) => b.max[1] - a.max[1]);
+    const picked = [];
+    for (const b of cands) {
+      if (picked.length >= 3) break;
+      const cx = (b.min[0] + b.max[0]) / 2, cz = (b.min[2] + b.max[2]) / 2;
+      if (picked.every(q => Math.hypot(q[0] - cx, q[1] - cz) > 150)) picked.push([cx, cz, b.max[1]]);
+    }
+    for (const [cx, cz, ry] of picked) { // water tower: tank on 4 legs
+      for (const [ox, oz] of [[-1.6, -1.6], [1.6, -1.6], [-1.6, 1.6], [1.6, 1.6]]) {
+        boxes.push({ min: [cx + ox - 0.2, ry, cz + oz - 0.2], max: [cx + ox + 0.2, ry + 5, cz + oz + 0.2] });
+        pushBox(P, C, I, V, cx + ox - 0.2, ry, cz + oz - 0.2, cx + ox + 0.2, ry + 5, cz + oz + 0.2, WOOD, WOOD); nMark++;
+      }
+      boxes.push({ min: [cx - 2.4, ry + 5, cz - 2.4], max: [cx + 2.4, ry + 9.5, cz + 2.4] });
+      pushBox(P, C, I, V, cx - 2.4, ry + 5, cz - 2.4, cx + 2.4, ry + 9.5, cz + 2.4, WOOD, ROOF); nMark++;
+    }
+    { // billboard near spawn + hero tower with antenna (fixed clear street/lot spots)
+      boxes.push({ min: [-47, 0, -72], max: [-45, 10, -70] });
+      pushBox(P, C, I, V, -47, 0, -72, -45, 10, -70, POLE, POLE); nMark++;
+      boxes.push({ min: [-47, 0, -62], max: [-45, 10, -60] });
+      pushBox(P, C, I, V, -47, 0, -62, -45, 10, -60, POLE, POLE); nMark++;
+      boxes.push({ min: [-47.2, 10, -72], max: [-44.8, 14, -60] });
+      pushBox(P, C, I, V, -47.2, 10, -72, -44.8, 14, -60, SIGN, SIGN); nMark++;
+      boxes.push({ min: [150, 0.3, 150], max: [174, 170, 174] });
+      pushBox(P, C, I, V, 150, 0.3, 150, 174, 170, 174, STEEL, ROOF); nMark++;
+      boxes.push({ min: [161, 170, 161], max: [163, 196, 163] });
+      pushBox(P, C, I, V, 161, 170, 161, 163, 196, 163, POLE, POLE); nMark++;
+    }
+  }
 
   // Stage 2: cheap windows — merged unlit quads, zero textures. Glass mesh is
   // always drawn (+1 draw); glow mesh holds only lit quads and is visible at
@@ -242,7 +310,8 @@ export async function buildFallbackCity({ scene, renderer }, { onStage, fbq = 'm
     },
   };
   console.log(`[city] fallback mobile city built in ${(performance.now() - t0).toFixed(0)} ms: ${boxes.length} boxes, ${(I.length / 3).toFixed(0)} tris, 0 textures` +
-    (Q > 0 ? `, ${winQuads} window quads` : ', fbq=low legacy look'));
+    (Q > 0 ? `, ${winQuads} window quads` : ', fbq=low legacy look') +
+    (Q >= 2 ? `, ${nPaint} paint boxes, ${nLamp} lamp boxes, ${nMark} landmark boxes` : ''));
   await onStage?.('city/fallback');
   return world;
 }
